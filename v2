@@ -1,0 +1,700 @@
+extensions [rngs]
+breed [socials social]                 ;all of these fish will want high conspecific densities
+breed [heterogeneouss heterogeneous]   ;this population will want a wide range of conspecific densities
+breed [asocials asocial]               ;all of these fish will want low conspecific densities
+breed [e_asocials e_asocial]           ;these are extremely asocial fish
+breed [e_socials e_social]             ;these are extremely social fish
+breed [Controls Control]               ;these fish lack any behavioral information
+breed [Nulls null]                     ;these fish have total random personalities with equal probability of every value between 0 and 1
+breed [Bimodals bimodal]               ;creates a population where half are social and half are asocial
+turtles-own
+[
+  SOCIABILITY                          ;state variable bound between 0 and 1
+  TARGET_DENSITY                       ;dependent on sociability
+  MY_DENSITY                           ;full knowledge of local conspecific density
+  SOCIAL_RANK                          ;dependent on sociability: bottom up ranked sociability
+  MAX_SEARCH_RADIUS                    ;dependent on Max_moves_per_tick
+  PANIC_TIME                           ;dependent on dispersal window (10%)
+  TIME_SINCE_LAST_POOL_FOUND           ;counter which tracks how many days have elapsed since the fish last found a pool
+  DAYS_UNHAPPY                         ;counter which tracks how many days have elapsed since the fish has encountered a suitable density
+  LAST_POOL_FOUND                      ;patch identifier: coordinates of the last pool the fish evaluated
+  BEEN_HERE_BEFORE?                    ; boolean identifier set to true if the fish has been in that pool before and is evaluating it's density
+  FIRST_PATCH                          ;patch identifier: coordinates the fish started at
+  LAST_PATCH                           ;patch identifier: coordinates the fish was last at
+  TOTAL_DISTANCE_TRAVELED              ;cummulative distance traveled from last-patch to current coordinates, added on every tick
+  LINEAR_DISTANCE_TRAVELED             ;distance from current patch to first patch on the final tick
+  TIME_SPENT_HERE                      ;counter which tracks how many days a turtle has been in a pool
+  STAY?                                ;boolean identifier: set to true if the fish is either happy or waiting for conditions to improve in the pool
+  HANG_OUT_COUNTER                     ;dependent on sociability: counts down by 10% every day the fish is unhappy
+]
+
+patches-own
+[
+  DEPTH                                ;state variable
+  DENSITY                              ;density of fish at the start of the day
+  MEAN_SOCIABILITY                     ;mean sociability of turtles on the patch, called by sociability list
+  VARIANCE_LIST                        ;variance of sociability turtles in the hole
+  STDEV_LIST                           ;standard deviation of sociability turtles in the hole
+]
+
+globals
+[
+  ALPHA                                ;beta distribution parameter
+  BETA                                 ;beta distribution parameter
+  DIST_COUNT                           ;count of sociability distributions activated for error checking purposes
+  RANDOM_FISH                          ;a random currently living fish
+  START#                               ;the number of fish at day 1
+  CURRENT_COUNT                        ; the current number of living fish
+  SOCIAL_RANK_LIST                     ;social ranking (lowest to highest sociability scores)
+  DISTANCE_LIST                        ;list of sociabilities and associated total distances traveled
+                                       ;DISPERSAL_WINDOW                    ;;DEFINED ON INTERFACE= total run time
+                                       ;MAX_TARGET                          ;;DEFINED ON INTERFACE= maximum preferred density if sociability = 1
+                                       ;MAX_MOVES_PER_TICK                  ;;DEFINED ON INTERFACE= maximum linear movement distance of a single fish in a single da+y
+                                       ;START_FISH_COUNT                    ;;DEFINED ON INTERFACE= initial population size to be generated
+  CUT_RUN_SHORT?
+  DENSITY_LIST                         ;LIST OF X COORDINATE AND ASSOCIATED DENSITIES and densities
+  SOCIABILITY_LIST                     ;x coordinate, y coordinate and mean sociability of turtles in the patch
+]
+
+
+to setup
+  clear-all
+  reset-ticks
+  stop-inspecting-dead-agents
+  set_globals                                                               ;if using optimal settings this will set all global factors to those used in experiments
+  make_pools
+  make_fish
+  if Show_social_v_asocial_path? = TRUE
+  [ if user-yes-or-no? ["To use this option you must select only the null or hetero distributions in the panel on the left, please ensure you have done so before proceeding"]
+    [
+      ask one-of turtles with [sociability > 0.9] [set color blue set size 4 pen-down ask other turtles with [sociability > 0.5] [set size 0]]
+      ask one-of turtles with [sociability < 0.1] [set color red set size 4 pen-down ask other turtles with [sociability < 0.6] [set size 0]]
+    ]
+  ]
+
+ ; ifelse EXPERIMENT_SETTINGS? = FALSE
+ ; [update_plots]                                                            ;if not running an experiment then update the plots in the window, but don't if experimenting (speed optimization)
+ ; [ask turtles [set size 0]]                                                ;if experimenting, make all turtles invisible (speed optimization)
+
+  ask patches [set DENSITY count turtles-here]
+  ; ask one-of patches [set DENSITY_LIST list "," DENSITY_LIST]
+
+  set social_rank_list sort-on [sociability] turtles                        ;sort the social rank by sociability low to high
+  Look_at_one_fish                                                          ;if watch_a_random_fish? is activated this makes all other fish invisible and tracks one random fish
+  set START# count turtles
+  fish_initial_state                                                        ;sets all turtle owned parameters to their initial state for all fish
+
+end
+
+to go
+  tick
+  if count turtles <= 10 [stop]                                             ;lines 2 and 3 of Go are error checking protocols to stop any runs that are using undesired scenarios (experiment speed optimization)
+  if DIST_COUNT > 1 [ask n-of (count turtles - 1) turtles [die]]
+
+  ask patches [set DENSITY count turtles-here]
+  ask turtles [set MY_DENSITY count turtles-here]
+
+  if Show_social_v_asocial_path? = TRUE
+  [
+    ask turtles with [size > 1] [set label precision TOTAL_DISTANCE_TRAVELED 2]
+  ]
+
+
+  ifelse Control? = TRUE
+    [ask Controls [Control_pool_search]]                                    ;if running a Control scenario, then tell Controls to search for pools without using social information
+    [  ifelse SOCIAL_RANK_ordered_movement? = TRUE                          ;if you want to use social rank ordered movement, then make the list and tell the fish to search for a pool in order of that list
+      [let rank-list sort-on [SOCIAL_RANK] turtles
+        foreach rank-list
+        [ask ? [pool_search]]]
+      [ask turtles [pool_search]]                                           ;if not, then just tell the fish to search for a pool in a random order
+    ]
+
+  ask turtles [track_travel]                                                ;this keeps track of how far each fish has moved
+
+  if ticks >= DISPERSAL_WINDOW [  Final_tick_procedures
+    stop]                                    ;stops the run and updates the plots/outputs when the dispersal window closes
+
+
+  if watch_a_RANDOM_FISH? = TRUE                                            ;if you're watching one fish, this block tells it to highlight it's search radius each day with a white splotch
+    [ask turtle RANDOM_FISH [show MY_DENSITY ask patches in-radius MAX_SEARCH_RADIUS [set pcolor white ]]]
+
+  if CUT_RUN_SHORT? = TRUE [Final_tick_procedures
+    stop]
+  update_plots
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;movement protocols;;;;;;;;;;;movement protocols;;;;;;;;;;;;;movement protocols;;;;;;;movement protocols;;;;;;;;;;;;;;;;;movement protocols;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+to Control_pool_search
+
+  let D min [DEPTH] of patches in-radius MAX_SEARCH_RADIUS                                                     ;minimum DEPTH of all patches reachable in one day
+  let Dn min-one-of patches in-radius MAX_SEARCH_RADIUS [DEPTH]                                                ;patch with the lowest DEPTH which can be reached in one day
+  let LDe [DEPTH] of patch-here                                                                                ;current patch DEPTH
+
+  ifelse patch-here = LAST_POOL_FOUND                                                                          ;note if you've found the same pool that you most recently evaluated
+    [set BEEN_HERE_BEFORE? TRUE ]
+    [set BEEN_HERE_BEFORE? FALSE ]
+
+
+  ifelse DEPTH < 0                                                                                             ;if you find a pool then reset your counter, if not then add to it
+    [set TIME_SINCE_LAST_POOL_FOUND 0]
+    [set TIME_SINCE_LAST_POOL_FOUND TIME_SINCE_LAST_POOL_FOUND + 1]
+
+  ifelse DEPTH < 0                                                                                             ;if you're in a POOL
+    [move-to patch-here                                                                                        ;center yourself in it
+      ifelse ((random-float 101) > 50)
+      [set color yellow stop]
+      [set color pink new_pool_search]                                                                                                     ;stop moving
+    ]
+
+    [ifelse LDe > D AND D < 0                                                                                  ;if your current patch DEPTH is greater than the minimum DEPTH you could achieve in one day
+      [move-to one-of patches in-radius MAX_SEARCH_RADIUS with-min [DEPTH]
+        stop
+      ]                                                                                                        ;go the the deeper patch and stop moving
+      [new_pool_search]                                                                                        ;if not, then go find a pool
+    ]
+end
+
+to new_pool_search
+  ifelse TIME_SINCE_LAST_POOL_FOUND < PANIC_TIME                                                               ;is it time to panic about how long it has been since you found a pool?
+    [right random-float SMALL_SEARCH_RADIUS                                                                    ;if not, then keep searching your local area intensively (you found a pool here before, there's probably another one nearby right?)
+      forward random-float MAX_MOVES_PER_TICK
+    ]
+    [right random-float BIG_SEARCH_RADIUS                                                                      ;if you are panicking then start a broader search pattern (you're not having any luck here so lets expand the search area)
+      forward random-float MAX_MOVES_PER_TICK
+    ]
+end
+
+to pool_search
+
+  let D min [DEPTH] of patches in-radius MAX_SEARCH_RADIUS                                                     ;minimum DEPTH of all patches reachable in one day
+  let Dn min-one-of patches in-radius MAX_SEARCH_RADIUS [DEPTH]                                                ;patch with the lowest DEPTH which can be reached in one day
+  let LDe [DEPTH] of patch-here                                                                                ;current patch DEPTH
+
+
+
+  ifelse patch-here = LAST_POOL_FOUND                                                                          ;note if you're in the last pool you abandoned or not
+  [set BEEN_HERE_BEFORE? TRUE ]
+  [set BEEN_HERE_BEFORE? FALSE ]
+
+  ifelse patch-here = LAST_PATCH                                                                               ;if you haven't moved today, add one to your counter. if you have, then set that counter to 0
+  [set TIME_SPENT_HERE TIME_SPENT_HERE + 1]                                                                    ;this counter is used in the hang out probability calculation
+  [set TIME_SPENT_HERE 0]
+
+  ifelse DEPTH < 0                                                                                             ;if you're in a pool then set that counter to 0, if not then add a day to it
+    [set TIME_SINCE_LAST_POOL_FOUND 0]
+    [set TIME_SINCE_LAST_POOL_FOUND TIME_SINCE_LAST_POOL_FOUND + 1]
+
+
+
+  ifelse DEPTH < 0                                                                                             ;if you're in a POOL
+    [move-to patch-here                                                                                        ;center yourself in it
+      should_I_hang_out                                                                                        ;decide if you should stay or not
+      ifelse stay? = TRUE                                                                                      ;if you decide to stay then center yourself and stop for the day
+      [move-to patch-here
+        stop
+      ]
+
+      [set LAST_POOL_FOUND patch-here                                                                          ;if you decided to move on then note the location of the pool and search for a new one
+        new_pool_search
+      ]
+    ]
+
+    [ifelse LDe > D AND D < 0                                                                                  ;if your current patch DEPTH is greater than the minimum DEPTH you could achieve in one day
+      [move-to Dn
+        stop
+      ]                                                                                                        ;go the the deeper patch and stay there for the day
+
+      [new_pool_search]
+    ]
+
+end
+
+
+to should_I_hang_out                                                                                          ;this calculates the STAY? factor as a function of time, sociability and patch suitability
+
+  let acceptable ((DENSITY >= (TARGET_DENSITY * (1 + DENSITY_WIGGLE_ROOM))) AND DENSITY < (TARGET_DENSITY * (1 - DENSITY_WIGGLE_ROOM))) ;be happy if you're in a patch that's within your the wiggle room range of density
+
+
+  if TIME_SPENT_HERE < 2[  set HANG_OUT_COUNTER (MAX_HANG_OUT_TIME * SOCIABILITY)]                            ;if you just got there, set your hang out counter to the individual's maximum possible value
+
+  move-to patch-here                                                                                          ;center yourself in the patch
+
+  ifelse Acceptable
+  [set stay? TRUE                                                                                             ;if you're happy then stick around and reset your hang out counter
+    set HANG_OUT_COUNTER (MAX_HANG_OUT_TIME * SOCIABILITY)
+    stop
+  ]
+
+  [ifelse (random-float MAX_HANG_OUT_TIME) > HANG_OUT_COUNTER                                                 ;if you're not happy then draw a random number.
+                                                                                                              ;if it's greater than your hang out counter
+    [set stay? FALSE                                                                                          ;note the location of your pool, leave, and max out your counter again to prepare for the next time
+      set LAST_POOL_FOUND patch-here
+
+      set HANG_OUT_COUNTER (MAX_HANG_OUT_TIME * SOCIABILITY)
+    ]
+
+    [set HANG_OUT_COUNTER (HANG_OUT_COUNTER * DECAY_COUNTER)                                                  ;if not then deduct 1- the DECAY_COUNTER from your HANG_OUT_COUNTER and stay for the rest of the day
+      set stay? TRUE
+    ]
+  ]
+
+end
+
+
+
+
+
+to wall_jump                                                                                                 ;this procedure makes fish turn away from world boundaries by having them draw an opposing random heading when they're within 5 patches of an edge
+  if abs pxcor >= (max-pxcor - 5)
+  [set heading (360 - (heading + random-float 90))]
+
+  if abs pycor >= (max-pycor - 5)
+  [set heading (270 - (heading + random-float 90))]
+
+  if abs pxcor <= (min-pxcor + 5)
+  [set heading (180 - (heading + random-float 90))]
+
+  if abs pycor >= (min-pxcor + 5)
+  [set heading (360 - (heading + random-float 360))]
+
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;world creation;;;;;;;;;;;;;world creation;;;;;;;;;;;;;world creation;;;;;;;;;;world creation;;;;;;;;;;;;;;;;;world creation;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+to make_pools
+  ifelse Grid_or_Rand_landscape? = TRUE
+  [
+    ask patches with [pxcor mod 20 = 0 and pycor mod 25 = 0  ]                                                               ;ask patches at every xy multiple of 25 to set their depth to -2
+    [set DEPTH -2
+
+    ]
+    ask patches with [pxcor < 5] [set DEPTH 0]                                                                               ;set the source depth to 0
+
+  ]
+
+
+  [
+    ;this block was used to generate a random landscape which was converted into a set csv file
+
+    file-open "depth_for_rand_landscape.txt"
+    while [not file-at-end?]
+    [
+      let next-X file-read
+      let next-Y file-read
+      let next-depth file-read
+      ask patch next-x next-y [set depth next-depth]
+    ]
+  ]
+    ask patches with [depth < 0] [set pcolor black]
+    ask patches with [depth >= 0] [set pcolor blue + 2]
+    ask patches with [pxcor < 5] [set pcolor blue - 2]
+
+
+  file-close-all
+
+
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;world ends;;;;;;;;;;;;;;world ends;;;;;;;;;;;;;;world ends;;;;;;;;;;;world ends;;;;;;;;;;;;;;;;;;world ends;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to apocalypse_check                                                                                                          ;kill every fish not in a pool at the end of the dispersal window
+  if ticks >= (DISPERSAL_WINDOW)
+  [ ask turtles with [DEPTH >= 0]
+    [die]
+  ]
+
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;turtle creation;;;;;;;;;;;;;turtle creation;;;;;;;;;;;;;turtle creation;;;;;;;;;;turtle creation;;;;;;;;;;;;;;;;;turtle creation;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+to source
+  setxy (random-float 5) (random max-pycor)
+end
+
+
+to make_fish
+
+;  if EXPERIMENT_SETTINGS? = TRUE ;THIS BLOCK OF CODE IS CALLED DURING EXPERIMENTS. IT REMOVES ALL AESTHETIC PROPERTIES OF THE FISH TO OPTIMIZE MODEL RUN SPEED
+  ;[
+    set DIST_COUNT 0                                                             ;this code block is used to count the number of SOCIABILITY distributions selected.
+    if social? = true [set DIST_COUNT DIST_COUNT + 1]
+    if asocial? = true [set DIST_COUNT DIST_COUNT + 1]
+    if hetero? = true [set DIST_COUNT DIST_COUNT + 1]
+
+
+    if Control? = true [set DIST_COUNT DIST_COUNT + 1]
+
+
+
+
+
+
+
+    if Social? = TRUE
+      [create-socials (START_FISH_COUNT / DIST_COUNT)
+        ask socials
+        [    set shape "fish"
+           set color blue
+          set size 3
+          set ALPHA 10
+          set BETA 2
+          source
+          rngs:init
+          let stream_id random-float 9999
+          let seed random-float 9999
+          rngs:set-seed stream_id seed
+          let dist rngs:rnd-beta stream_id ALPHA BETA
+          set SOCIABILITY dist
+
+        ]
+      ]
+
+    if hetero? = TRUE
+    [create-heterogeneouss (START_FISH_COUNT / DIST_COUNT)
+      ask heterogeneouss
+        [
+           set shape "fish"
+           set color scale-color green sociability 0 1
+          set size 3
+          set ALPHA 2
+          set BETA 2
+          source
+          rngs:init
+          let stream_id random-float 9999
+          let seed random-float 9999
+          rngs:set-seed stream_id seed
+          let dist rngs:rnd-beta stream_id ALPHA BETA
+          set SOCIABILITY dist
+
+        ]
+    ]
+
+    if asocial? = TRUE
+    [create-asocials (START_FISH_COUNT / DIST_COUNT)
+      ask asocials
+        [    set shape "fish"
+           set color red
+          set size 3
+          set ALPHA 2
+          set BETA 10
+          source
+          rngs:init
+          let stream_id random-float 9999
+          let seed random-float 9999
+          rngs:set-seed stream_id seed
+          let dist rngs:rnd-beta stream_id ALPHA BETA
+          set SOCIABILITY dist
+
+        ]
+    ]
+
+
+    if Control? = TRUE
+    [create-Controls (START_FISH_COUNT / DIST_COUNT)
+      ask Controls
+        [    set shape "fish"
+           set color black
+          set size 3
+          set SOCIABILITY 1.1
+          source
+        ]
+    ]
+ ; ]
+
+
+
+
+
+  ask turtles [
+    set TARGET_DENSITY (1 + round (SOCIABILITY * MAX_TARGET))                         ;creates the individual target DENSITY value.
+   ; set MAX_SEARCH_RADIUS (MAX_MOVES_PER_TICK / 4)
+   set MAX_SEARCH_RADIUS (MAX_MOVES_PER_TICK * MAX_SEARCH_RADIUS2) ;used for sensitivity analysis, annotate out and set value in above line to optimal level
+    set heading 90]
+  ranking
+  if DIST_COUNT = 0
+    [ crt 1]
+
+
+
+end
+
+
+to ranking
+  let rank-list sort-on [SOCIABILITY] turtles                                                                 ;create a low to high sorted list of ranked SOCIABILITY scores
+  let ranks n-values length rank-list [ ? ]                                                                   ;rename each turtle according to it's ranked location in that list
+    (foreach rank-list ranks [ask ?1 [set SOCIAL_RANK ?2] ] )
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;plots & counters;;;;;;;;;;;;;plots & counters;;;;;;;;;;;;;plots & counters;;;;;;;;;;plots & counters;;;;;;;;;;;;;;plots & counters;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to update_plots
+
+  set-current-plot "SOCIABILITY distribution"                                              ;draw a histogram of the population sociabilities
+  histogram [SOCIABILITY] of turtles
+
+
+  set-current-plot "Individual target DENSITY"                                             ;draw a histogram of the target densities of the population, if any fish are alive
+  if count turtles > 0[
+    set-plot-x-range 0 (round max [TARGET_DENSITY] of turtles + 1)
+    histogram [TARGET_DENSITY] of turtles
+  ]
+
+  if ticks > 0                                                                             ;after tick 0
+  [
+    set-current-plot "Pool DENSITY"                                                        ;draw a histogram of the pool densities
+    if (count (patches with [DEPTH < 0 AND DENSITY > 0])) > 0
+      [
+        set-plot-x-range 0 (max ([DENSITY] of patches with [DEPTH < 0 AND DENSITY > 0] ) )
+        if(count (patches with [DEPTH < 0 AND DENSITY > 0 ]) > 0)
+        [histogram [DENSITY] of patches with [DEPTH < 0 AND DENSITY > 0]]
+
+      ]
+
+  ]
+
+  if ticks >= DISPERSAL_WINDOW
+  [let happy (count turtles with [MY_DENSITY > TARGET_DENSITY * (1 - DENSITY_WIGGLE_ROOM) AND MY_DENSITY < TARGET_DENSITY * (1 + DENSITY_WIGGLE_ROOM)])
+
+    set CURRENT_COUNT count turtles
+
+    ;this block produces the output placed in the white output box on the interface
+
+    output-print (word (( CURRENT_COUNT / START# ) * 100) "% of turtles survived")
+    output-print (word " ")
+    IFelse happy > 0
+      [ output-print (word " ")
+        output-print (word ((happy / CURRENT_COUNT ) * 100) ("% of survivors achieved desired DENSITY"))  ]
+      [ output-print (word " ")
+        output-print (word 0 ("% of survivors achieved desired DENSITY"))  ]
+
+    if CURRENT_COUNT > 0
+    [ output-print (word ((mean [LINEAR_DISTANCE_TRAVELED] of turtles) * 100) "(m) mean linear distance traveled " )
+      output-print (word " ")
+      output-print (word ((mean [TOTAL_DISTANCE_TRAVELED] of turtles) * 100) "(m) mean total distance traveled")
+      output-print (word " ")
+      output-print (word (mean ([DENSITY] of patches with [DENSITY > 0 AND DEPTH < 0])) " mean DENSITY of occupied patches")
+      output-print (word " ")
+      output-print (word (standard-deviation ([DENSITY] of patches with [DENSITY > 0 and DEPTH < 0])) "standard deviation of the DENSITY of occupied patches")
+      output-print (word " ")
+      output-print (word ((mean ([TARGET_DENSITY] of turtles)) ) "mean TARGET_DENSITY ")
+      output-print (word " ")
+      output-print (word (standard-deviation ([TARGET_DENSITY] of turtles)) "standard deviation of the target DENSITY of fish")
+      output-print (word " ")
+      output-print (word (median ([DENSITY] of patches with [DENSITY > 0 and DEPTH < 0])) " median DENSITY of occupied patches")
+      output-print (word " ")
+      output-print (word ((MEDIAN ([TARGET_DENSITY] of turtles)) ) "MEDIAN TARGET_DENSITY ")
+      output-print (word " ")
+      output-print (word (modes ([DENSITY] of patches with [DEPTH < 0 AND DENSITY > 0])) " DENSITY modes of occupied patches")
+      output-print (word " ")
+      output-print (word ((MODES [TARGET_DENSITY] of turtles) ) "MODAL TARGET_DENSITY ")
+    ]
+  ]
+
+end
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;misc;;;;;;;;;;;;miscs;;;;;;;;;;;;;misc;;;;;;;;;;misc;;;;;;;;;misc;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+to set_globals
+  if USE_OPTIMAL_SETTINGS? = TRUE                                                                     ;these values were selected using a sensativity analysis as they procude the desired patterns
+  [set DENSITY_WIGGLE_ROOM 0.25
+    set BIG_SEARCH_RADIUS 225
+    set SMALL_SEARCH_RADIUS 133
+    set MAX_HANG_OUT_TIME 5
+    set SOCIAL_RANK_ORDERED_MOVEMENT? TRUE
+    set WATCH_A_RANDOM_FISH? FALSE
+    set START_FISH_COUNT 1000
+    ; set DISPERSAL_WINDOW 200
+    set MAX_TARGET 40
+    set MAX_MOVES_PER_TICK 30
+    set CUT_RUN_SHORT? FALSE
+  ]
+
+end
+
+to Look_at_one_fish
+  if watch_a_RANDOM_FISH? = TRUE
+  [
+    if watch_a_RANDOM_FISH?   = TRUE
+    [
+      ifelse user-yes-or-no? "Do you want to shrink all fish except the one of interest? They will continue to exist, but be invisible. This will allow the model to run faster, as well as make it easier to observe the fish of interest."
+      [ask turtles [set size 0 ]
+
+        set RANDOM_FISH random START_FISH_COUNT
+        ask turtle RANDOM_FISH [set size 5 set color yellow pd]
+        inspect turtle RANDOM_FISH
+        output-print "Pull the inspection window down"
+        output-print " "
+        output-print "The white area around the fish you're watching is the"
+        output-print " area searched in one day"
+        output-print " "
+        output-print "The command center shows this fish's local density"
+        output-print "at the end of every day"
+        output-print "............................................................... "
+      ]
+      [
+        set RANDOM_FISH random START_FISH_COUNT
+        ask turtle RANDOM_FISH [set size 5 set color yellow pd ]
+        inspect turtle RANDOM_FISH
+        output-print "Pull the inspection window down"
+        output-print " "
+        output-print "The white area around the fish you're watching is the"
+        output-print " area searched in one day"
+        output-print " "
+        output-print "The command center shows this fish's local density"
+        output-print "at the end of every day"
+        output-print "................................................................. "
+
+      ]
+    ]
+  ]
+
+end
+
+to fish_initial_state                                                                                                       ;this procedure is called during setup and sets all turtle parameters to the necessary initial state
+  ask turtles
+  [ set LAST_PATCH patch-here
+    set FIRST_PATCH patch-here
+    set TOTAL_DISTANCE_TRAVELED 0
+    SET LINEAR_DISTANCE_TRAVELED 0
+    Set TIME_SPENT_HERE 0
+    Set STAY? FALSE
+    set HANG_OUT_COUNTER 0
+    set PANIC_TIME (DISPERSAL_WINDOW * PANIC_DISCOUNT)
+  ]
+end
+
+to final_tick_procedures                                                                                                  ;this procedure is called at the end of the run to color fish based on their happieness and then start the apocalypse and update plots
+  if Show_social_v_asocial_path? = TRUE
+  [ask patches [set pcolor white]
+    ask turtles with [size > 1]
+      [
+        ifelse sociability > 0.5
+          [set label ""
+            set plabel precision TOTAL_DISTANCE_TRAVELED 2
+            ;ask one-of neighbors  [set plabel  "Social"]
+            ask patch 60 60 [set plabel-color black set plabel "Social fish traveled an average (in m) of" ]
+            ask patch 60 55 [set plabel-color black set plabel precision (100 * mean [TOTAL_DISTANCE_TRAVELED] of turtles with [sociability > 0.5]) 2]
+
+          ]
+
+          [set label ""
+            set plabel precision TOTAL_DISTANCE_TRAVELED 2
+            ;  ask one-of neighbors  [set plabel "Asocial"]
+            ask patch 160 60 [set plabel-color black set plabel "Asocial fish traveled an average (in m) of" ]
+            ask patch 160 55 [set plabel-color black set plabel precision (100 * mean [TOTAL_DISTANCE_TRAVELED] of turtles with [sociability < 0.5001]) 2]
+          ]
+      ]
+
+  ]
+
+  ask patches [set DENSITY count turtles-here]
+
+  set DISTANCE_LIST (list "sociability distance")
+  ask turtles [
+    set DISTANCE_LIST lput "," DISTANCE_LIST
+    set DISTANCE_LIST lput (precision SOCIABILITY 4) DISTANCE_LIST
+    set DISTANCE_LIST lput " " DISTANCE_LIST
+    set DISTANCE_LIST lput TOTAL_DISTANCE_TRAVELED DISTANCE_LIST
+  ]
+
+  ask one-of patches [set DENSITY_LIST (list "x density")]
+  ask patches with [DEPTH < 0][
+    set DENSITY_LIST lput " " DENSITY_LIST
+    set DENSITY_LIST lput pxcor DENSITY_LIST
+    set DENSITY_LIST lput " " DENSITY_LIST
+    set DENSITY_LIST lput DENSITY DENSITY_LIST
+  ]
+
+
+
+  ask patches with [depth < 0 AND DENSITY > 0]  [set MEAN_SOCIABILITY (precision (mean [sociability] of turtles-here) 4)]
+  ask patches with [DEPTH < 0 AND DENSITY = 0] [set MEAN_SOCIABILITY (0)]
+  ask one-of patches [set SOCIABILITY_LIST (list "x y mean sociability")]
+  ask patches with [DEPTH < 0][
+    set SOCIABILITY_LIST lput "," SOCIABILITY_LIST
+    set SOCIABILITY_LIST lput pxcor SOCIABILITY_LIST
+    set SOCIABILITY_LIST lput " " SOCIABILITY_LIST
+    set SOCIABILITY_LIST lput pYcor SOCIABILITY_LIST
+    set SOCIABILITY_LIST lput " " SOCIABILITY_LIST
+    set SOCIABILITY_LIST lput MEAN_SOCIABILITY SOCIABILITY_LIST
+  ]
+
+
+
+  ; ask patches with [DEPTH < 0] [set DENSITY_LIST (list (pxcor)(",") (DENSITY) (",") )]
+
+;
+;  ask patches with [DEPTH < 0 and DENSITY > 1] [set VARIANCE_LIST (list (pxcor)(",")(pycor) (",") (variance [SOCIABILITY] of turtles-here) (",") )]
+;  ask patches with [DEPTH < 0 and DENSITY <= 1] [set VARIANCE_LIST (list (pxcor)(",")(pycor) (",") (0) (",") )]
+;
+;  ask patches with [DEPTH < 0 and DENSITY > 1] [set STDEV_LIST (list (pxcor)(",")(pycor) (",") (standard-deviation [SOCIABILITY] of turtles-here) (",") )]
+;  ask patches with [DEPTH < 0 and DENSITY <= 1] [set STDEV_LIST (list (pxcor)(",")(pycor) (",") (0) (",") )]
+;
+  apocalypse_check
+  set CURRENT_COUNT count turtles
+
+
+end
+
+
+to track_travel                                                                                                              ;this is invoked during go to tell fish to keep track of where they are with reference to where they just were as well as where they started
+  if patch-here != LAST_PATCH
+  [set TOTAL_DISTANCE_TRAVELED (TOTAL_DISTANCE_TRAVELED + (distance LAST_PATCH))
+    set LAST_PATCH patch-here]
+  set TOTAL_DISTANCE_TRAVELED precision TOTAL_DISTANCE_TRAVELED 4
+
+  if ticks >= DISPERSAL_WINDOW [set LINEAR_DISTANCE_TRAVELED (distance FIRST_PATCH)]
+  ; if Control? = TRUE AND ticks > 50 AND ((count turtles with [DEPTH < 0 ]) = (count turtles)) [set CUT_RUN_SHORT? TRUE]
+end
+
+
+to recolor_world
+  ask patches with [depth >= 0] [set pcolor black]
+  let MaxD (max [density] of patches with [depth < 0])
+  ask patches with [depth < 0]
+  [set plabel DENSITY
+    ask other patches in-radius 5
+    [set DENSITY (max [DENSITY] of patches in-radius 5 with [DEPTH < 0])
+      set pcolor scale-color DENSITY red 0 MaxD
+    ]
+  ]
+  ask patches with [depth < 0 AND density = 0] [ask other patches in-radius 5 [set pcolor white]]
+
+  ask turtles [set size 0]
+
+end
+
+to recolor_world_by_sociability
+  ask patches with [depth >= 0] [set pcolor black]
+  ask patches with [DEPTH < 0 and DENSITY > 0] [set pcolor scale-color blue mean [SOCIABILITY] of turtles-here 0 1
+    set plabel (precision (mean [sociability] of turtles-here) 2)
+    let p pcolor
+    ask patches in-radius 5 [set pcolor p] ]
+
+  ask patches with [DEPTH < 0 AND DENSITY = 0]
+  [
+    set pcolor white
+    ask other patches in-radius 5 [set pcolor white]
+  ]
+
+  ask turtles [set size 0]
+
+end
